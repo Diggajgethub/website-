@@ -116,6 +116,22 @@
   .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 24px; }
   .notice { background: var(--warn-bg); color: var(--warn); border-radius: 8px; padding: 10px 14px; font-size: .92rem; margin-top: 18px; }
 
+  /* Item ratings and comments */
+  .reviews { margin-top: 24px; padding: 24px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+  .reviews h2 { font-size: 1.5rem; }
+  .review-summary { margin: 12px 0; font-weight: 600; }
+  .stars { color: var(--warn); letter-spacing: 3px; }
+  .rating-picker { border: 0; padding: 0; margin: 18px 0; }
+  .rating-picker legend { font-weight: 600; }
+  .star-options { display: flex; flex-wrap: wrap; gap: 8px; }
+  .star-options label { cursor: pointer; display: inline-flex; align-items: center; gap: 4px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; }
+  .star-options label:has(input:checked) { background: var(--warn-bg); border-color: var(--warn); }
+  .review-entry { border-top: 1px solid var(--line); padding: 18px 0; }
+  .review-entry p { white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: 0; }
+  .review-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+  .review-meta time { color: var(--muted); font-size: .85rem; }
+  @media (max-width: 720px) { .reviews { padding: 16px; } }
+
   /* Forms */
   .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 26px; max-width: 480px; margin: 20px auto; }
   .panel.wide { max-width: 720px; }
@@ -157,52 +173,77 @@
 <div id="toastHost" aria-live="polite"></div>
 
 <script>
-/* ============================================================
-   SWF - Secure Website Finder
-   Static site: works from an S3 bucket with static website hosting.
-   Data layer is in `store` below. Swap its methods for fetch() calls
-   to API Gateway + Lambda + DynamoDB when you're ready for a real backend.
-   ============================================================ */
-
-/* ---- DEMO LOGIN (client-side only, NOT real security) ---- */
-const DEMO_ADMIN = { username: "admin", password: "admin123" };
-
-/* ---- Seed data. Links use www.google.com placeholders: replace with real verified sites. ---- */
-const SEED_ITEMS = [
-  { id: "i1", name: "Base Set Charizard (1st Edition)", category: "Collectibles", emoji: "🃏", image: "",
-    siteName: "google Card Vault", siteUrl: "https://www.google.com/card-vault",
-    reason: "Sample entry. Seller shows graded-card certificate numbers, has a published return policy, and uses HTTPS checkout through a major payment processor." },
-  { id: "i2", name: "Discontinued Retro Sneakers", category: "Shoes", emoji: "👟", image: "",
-    siteName: "google Sole Archive", siteUrl: "https://www.google.com/sole-archive",
-    reason: "Sample entry. Authentication guarantee on every pair and a business address that checks out." },
-  { id: "i3", name: "Vintage Game Console", category: "Electronics", emoji: "🎮", image: "",
-    siteName: "google Retro Tech", siteUrl: "https://www.google.com/retro-tech",
-    reason: "Sample entry. Items are tested before listing and buyers get a 30-day return window." },
-  { id: "i4", name: "Mid-century Armchair", category: "Furniture", emoji: "🪑", image: "",
-    siteName: "google Furniture Finds", siteUrl: "https://www.google.com/furniture-finds",
-    reason: "Sample entry. Verified seller with long-running history and clear shipping terms." },
-  { id: "i5", name: "Out-of-print Snack Box", category: "Food", emoji: "🍬", image: "",
-    siteName: "google Candy Crate", siteUrl: "https://www.google.com/candy-crate",
-    reason: "Sample entry. Lists expiration dates and has a verified business registration." },
-  { id: "i6", name: "Limited Run Hoodie", category: "Clothes", emoji: "🧥", image: "",
-    siteName: "google Threads", siteUrl: "https://www.google.com/threads",
-    reason: "Sample entry. Official reseller with a secure checkout and tracked shipping." }
-];
-
-/* ---- Storage layer (swap for API calls later) ---- */
+/* AWS configuration: public application identifiers, no secret keys. */
+const CONFIG = {
+  api: "https://l8pef0irs3.execute-api.us-east-2.amazonaws.com",
+  domain: "https://us-east-22qeuflen8.auth.us-east-2.amazoncognito.com",
+  clientId: "7enbdneosgfua20ourlv2i046f",
+  issuer: "https://cognito-idp.us-east-2.amazonaws.com/us-east-2_2qeUFleN8",
+  redirect: "https://d30v3zepxqi0h5.cloudfront.net/"
+};
+const TOKEN_KEY = "swf_cognito_tokens_v1";
+let itemCache = [], authTokens = null;
+const base64url = bytes => btoa(String.fromCharCode(...bytes)).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+function tokenClaims(token) {
+  const part = token.split(".")[1].replace(/-/g,"+").replace(/_/g,"/");
+  return JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(part.padEnd(Math.ceil(part.length/4)*4,"=")), c => c.charCodeAt(0))));
+}
+function clearAuth() { authTokens = null; sessionStorage.removeItem(TOKEN_KEY); }
+function getSession() {
+  try {
+    if (!authTokens) authTokens = JSON.parse(sessionStorage.getItem(TOKEN_KEY) || "null");
+    if (!authTokens?.id_token) return null;
+    const claims = tokenClaims(authTokens.id_token);
+    if (claims.exp * 1000 <= Date.now() || claims.iss !== CONFIG.issuer || claims.aud !== CONFIG.clientId) { clearAuth(); return null; }
+    return {username:claims["cognito:username"] || "Member", role:(claims["cognito:groups"] || []).includes("Admins") ? "admin" : "user"};
+  } catch (e) { authTokens = null; return null; }
+}
+async function startLogin(register=false) {
+  const random = () => base64url(crypto.getRandomValues(new Uint8Array(32)));
+  const verifier = random(), state = random(), nonce = random();
+  const challenge = base64url(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))));
+  sessionStorage.setItem("swf_login", JSON.stringify({verifier,state,nonce,returnHash:location.hash.startsWith("#/item/") ? location.hash : "#/",time:Date.now()}));
+  const params = new URLSearchParams({client_id:CONFIG.clientId,redirect_uri:CONFIG.redirect,response_type:"code",scope:"openid email",state,nonce,code_challenge:challenge,code_challenge_method:"S256"});
+  location.assign(CONFIG.domain + (register ? "/signup?" : "/oauth2/authorize?") + params);
+}
+async function finishLogin() {
+  const params = new URLSearchParams(location.search);
+  if (!params.has("code") && !params.has("error")) return;
+  const pending = JSON.parse(sessionStorage.getItem("swf_login") || "null");
+  history.replaceState(null,"",location.pathname + "#/");
+  sessionStorage.removeItem("swf_login");
+  if (!pending || params.get("state") !== pending.state || Date.now()-pending.time > 900000) throw new Error("Login expired or could not be verified. Please log in again.");
+  if (params.has("error")) throw new Error("Login was cancelled or denied. Please try again.");
+  const res = await fetch(CONFIG.domain + "/oauth2/token", {method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams({grant_type:"authorization_code",client_id:CONFIG.clientId,code:params.get("code"),redirect_uri:CONFIG.redirect,code_verifier:pending.verifier})});
+  if (!res.ok) throw new Error("Could not finish login. Please try again.");
+  const tokens = await res.json();
+  const claims = tokenClaims(tokens.id_token);
+  if (claims.nonce !== pending.nonce || claims.iss !== CONFIG.issuer || claims.aud !== CONFIG.clientId || claims.exp*1000 <= Date.now()) throw new Error("Login response could not be verified.");
+  authTokens = {id_token:tokens.id_token};
+  sessionStorage.setItem(TOKEN_KEY, JSON.stringify(authTokens));
+  history.replaceState(null,"",location.pathname + pending.returnHash);
+}
+async function api(path, method="GET", data) {
+  const headers = {};
+  if (method !== "GET") {
+    if (!getSession()) throw new Error("Your session expired. Log in again before saving.");
+    // API Gateway verifies the ID token's signature, issuer, audience and expiry.
+    headers.Authorization = "Bearer " + authTokens.id_token;
+    headers["Content-Type"] = "application/json";
+  }
+  let res;
+  try { res = await fetch(CONFIG.api + path,{method,headers,cache:"no-store",...(data === undefined ? {} : {body:JSON.stringify(data)})}); }
+  catch (e) { throw new Error("Could not reach the server. Check your connection and try again."); }
+  const result = await res.json().catch(() => ({}));
+  if (res.status === 401) { clearAuth(); renderHeader(); }
+  if (!res.ok) throw new Error(result.message || "Request failed. Please try again.");
+  return result;
+}
 const store = {
-  KEY: "swf_items_v1", SESSION: "swf_session_v1",
-  items() {
-    try {
-      const raw = localStorage.getItem(this.KEY);
-      if (raw) return JSON.parse(raw);
-    } catch (e) {}
-    return SEED_ITEMS.map(x => ({ ...x }));
-  },
-  saveItems(list) { try { localStorage.setItem(this.KEY, JSON.stringify(list)); } catch (e) { toast("Could not save: storage is full or blocked."); } },
-  session() { try { return JSON.parse(localStorage.getItem(this.SESSION)) || null; } catch (e) { return null; } },
-  setSession(s) { try { s ? localStorage.setItem(this.SESSION, JSON.stringify(s)) : localStorage.removeItem(this.SESSION); } catch (e) {} },
-  resetDemo() { try { localStorage.removeItem(this.KEY); } catch (e) {} }
+  session:getSession,
+  items:() => itemCache,
+  reviews:async id => (await api("/items/" + encodeURIComponent(id) + "/reviews")).reviews,
+  addReview:review => api("/items/" + encodeURIComponent(review.itemId) + "/reviews","POST",{rating:review.rating,comment:review.comment})
 };
 
 /* ---- Helpers ---- */
@@ -231,8 +272,10 @@ function renderHeader() {
   document.getElementById("authBtn").textContent = s ? "Logout" : "Login";
 }
 document.getElementById("authBtn").addEventListener("click", () => {
-  if (store.session()) { store.setSession(null); renderHeader(); toast("Logged out"); location.hash = "#/"; route(); }
-  else location.hash = "#/login";
+  if (store.session()) {
+    clearAuth();
+    location.assign(CONFIG.domain + "/logout?" + new URLSearchParams({client_id:CONFIG.clientId,logout_uri:CONFIG.redirect}));
+  } else location.hash = "#/login";
 });
 
 /* ---- Views ---- */
@@ -279,10 +322,15 @@ function drawGrid() {
       ${admin ? `<div class="card-admin"><a class="btn ghost small" href="#/edit/${esc(i.id)}">Edit</a><button class="btn danger small" data-del="${esc(i.id)}" type="button">Delete</button></div>` : ""}
     </article>`).join("") +
     (admin ? `<a class="add-card" href="#/edit/new"><span>+</span>Add item</a>` : "");
-  grid.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", () => {
+  grid.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", async () => {
     const item = store.items().find(x => x.id === b.dataset.del);
     if (item && confirm(`Delete “${item.name}”?`)) {
-      store.saveItems(store.items().filter(x => x.id !== item.id)); toast("Item deleted"); drawGrid();
+      b.disabled = true;
+      try {
+        await api("/items/" + encodeURIComponent(item.id), "DELETE");
+        itemCache = itemCache.filter(x => x.id !== item.id);
+        toast("Item deleted"); drawGrid();
+      } catch (e) { toast(e.message); b.disabled = false; }
     }
   }));
 }
@@ -307,32 +355,75 @@ function viewItem(id) {
           ${isAdmin() ? `<a class="btn ghost" href="#/edit/${esc(i.id)}">Edit this page</a>` : ""}
         </div>
       </div>
-    </article>`;
+    </article>
+    <section class="reviews" aria-labelledby="reviewsTitle" id="reviews"></section>`;
+  renderReviews(id);
 }
 
-function viewLogin() {
-  $app.innerHTML = `
-    <form class="panel" id="loginForm" novalidate>
-      <h1>Login</h1>
-      <p class="sub">Log in to your account. Admins can change the listings.</p>
-      <label for="u">Username</label>
-      <input class="input" id="u" autocomplete="username" required>
-      <label for="p">Password</label>
-      <input class="input" id="p" type="password" autocomplete="current-password" required>
-      <div class="error" id="err" role="alert"></div>
-      <div class="row"><button class="btn" type="submit">Login</button><a class="btn ghost" href="#/">Cancel</a></div>
-      <div class="notice">Demo mode: use <b>admin</b> / <b>admin123</b> for admin. Any other username signs in as a regular user.</div>
-    </form>`;
-  document.getElementById("loginForm").addEventListener("submit", e => {
+/* Shared reviews loaded from AWS. */
+async function renderReviews(itemId) {
+  const host = document.getElementById("reviews");
+  const session = store.session();
+  let reviews = [], loadFailed = false;
+  try { reviews = await store.reviews(itemId); }
+  catch (e) { loadFailed = true; }
+  if (!host.isConnected) return;
+  const average = reviews.length ? (reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length).toFixed(1) : null;
+  host.innerHTML = `
+    <h2 id="reviewsTitle">Ratings &amp; comments</h2>
+    <div class="review-summary">${average ? `<span class="stars" aria-hidden="true">${"★".repeat(Math.round(Number(average)))}${"☆".repeat(5 - Math.round(Number(average)))}</span> ${average} out of 5 · ${reviews.length} review${reviews.length === 1 ? "" : "s"}` : "No ratings yet"}</div>
+
+    ${loadFailed ? '<p class="error" role="alert">Reviews could not be loaded. Refresh the page to try again.</p>' : ""}
+    ${session ? `<form id="reviewForm">
+      <h3>Leave a review</h3>
+      <p class="hint">Posting as ${esc(session.username)}</p>
+      <fieldset class="rating-picker"><legend>Your rating (required)</legend>
+        <div class="star-options">${[1,2,3,4,5].map(n => `<label><input type="radio" name="rating" value="${n}" required><span aria-hidden="true">${n} ★</span><span class="hint">${n === 1 ? "star" : "stars"}</span></label>`).join("")}</div>
+      </fieldset>
+      <label for="reviewComment">Your comment (required)</label>
+      <textarea class="input" id="reviewComment" maxlength="2000" required placeholder="Share your experience with this item or website…" aria-describedby="commentHint"></textarea>
+      <p class="hint" id="commentHint">Maximum 2,000 characters.</p>
+      <div class="error" id="reviewError" role="alert"></div>
+      <button class="btn" type="submit">Post review</button>
+    </form>` : '<p><a class="btn ghost" href="#/login">Log in to leave a review</a></p>'}
+    <h3 style="margin-top:28px">Comments</h3>
+    <div>${reviews.length ? reviews.map(r => `<article class="review-entry">
+      <div class="review-meta"><strong>${esc(r.username)}</strong><span class="stars" aria-label="${r.rating} out of 5 stars">${"★".repeat(r.rating)}${"☆".repeat(5-r.rating)}</span>
+      ${Number.isFinite(Date.parse(r.createdAt)) ? `<time datetime="${esc(new Date(r.createdAt).toISOString())}">${esc(new Date(r.createdAt).toLocaleDateString(undefined, {year:"numeric", month:"short", day:"numeric"}))}</time>` : ""}</div>
+      <p>${esc(r.comment)}</p></article>`).join("") : '<p class="hint">No comments yet. Be the first to share your experience.</p>'}</div>`;
+  const form = document.getElementById("reviewForm");
+  if (form) form.addEventListener("submit", async e => {
     e.preventDefault();
-    const u = document.getElementById("u").value.trim(), p = document.getElementById("p").value;
-    const err = document.getElementById("err");
-    if (!u || !p) { err.textContent = "Enter both a username and a password."; return; }
-    if (u.toLowerCase() === DEMO_ADMIN.username) {
-      if (p !== DEMO_ADMIN.password) { err.textContent = "That password is not correct for this admin account."; return; }
-      store.setSession({ username: u, role: "admin" });
-    } else store.setSession({ username: u, role: "user" });
-    renderHeader(); toast("Welcome, " + u); location.hash = "#/";
+    const error = document.getElementById("reviewError");
+    const current = store.session();
+    if (!current) { error.textContent = "Please log in before posting."; return; }
+    const rating = Number(new FormData(form).get("rating"));
+    const comment = document.getElementById("reviewComment").value.trim();
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) { error.textContent = "Choose 1 to 5 stars."; return; }
+    if (!comment || comment.length > 2000) { error.textContent = "Enter a comment between 1 and 2,000 characters."; return; }
+    const submit = form.querySelector("button[type=submit]"); submit.disabled = true;
+    try { await store.addReview({id: newId(), itemId, username: String(current.username), rating, comment, createdAt: new Date().toISOString()}); }
+    catch (e) { error.textContent = e.message; submit.disabled = false; return; }
+    await renderReviews(itemId);
+    if (!host.isConnected) return;
+    document.getElementById("reviewsTitle").setAttribute("tabindex", "-1");
+    document.getElementById("reviewsTitle").focus();
+    toast("Review posted");
+  });
+}
+
+function viewLogin() { viewAccount(false); }
+function viewCreateAccount() { viewAccount(true); }
+function viewAccount(register) {
+  $app.innerHTML = `<section class="panel"><h1>${register ? "Create account" : "Login"}</h1>
+    <p class="sub">${register ? "Create your account to rate items and leave comments." : "Sign in to leave reviews or manage your listings."}</p>
+    <button type="button" class="btn" id="continueLogin">${register ? "Create account" : "Continue to login"}</button>
+    <p>${register ? '<a href="#/login">Already have an account? Login</a>' : '<a href="#/create-account">Create account</a>'}</p>
+    <div class="error" id="loginError" role="alert"></div></section>`;
+  document.getElementById("continueLogin").addEventListener("click", async e => {
+    e.currentTarget.disabled = true;
+    try { await startLogin(register); }
+    catch (error) { document.getElementById("loginError").textContent = error.message; e.target.disabled = false; }
   });
 }
 
@@ -367,42 +458,63 @@ function viewEdit(id) {
     r.onload = () => {
       const im = new Image();
       im.onload = () => {
-        const max = 640, k = Math.min(1, max / Math.max(im.width, im.height));
+        const max = 480, k = Math.min(1, max / Math.max(im.width, im.height));
         const c = document.createElement("canvas"); c.width = Math.round(im.width * k); c.height = Math.round(im.height * k);
         c.getContext("2d").drawImage(im, 0, 0, c.width, c.height);
-        image = c.toDataURL("image/jpeg", 0.82); prev.src = image; prev.style.display = "block";
+        image = c.toDataURL("image/jpeg", 0.65); prev.src = image; prev.style.display = "block";
       };
       im.onerror = () => { document.getElementById("err").textContent = "That file could not be read as an image."; };
       im.src = r.result;
     };
     r.readAsDataURL(f);
   });
-  document.getElementById("editForm").addEventListener("submit", e => {
+  document.getElementById("editForm").addEventListener("submit", async e => {
     e.preventDefault();
     const v = k => document.getElementById(k).value.trim();
     const err = document.getElementById("err");
     if (!v("name") || !v("site")) { err.textContent = "Item name and website name are required."; return; }
     if (!safeUrl(v("url"))) { err.textContent = "Enter a full website link that starts with https://"; return; }
     const updated = { ...cur, name: v("name"), category: v("cat"), siteName: v("site"), siteUrl: safeUrl(v("url")), reason: v("reason"), image };
-    const list = store.items();
-    const idx = list.findIndex(x => x.id === updated.id);
-    idx >= 0 ? list[idx] = updated : list.push(updated);
-    store.saveItems(list); toast(isNew ? "Item added" : "Changes saved"); location.hash = "#/item/" + updated.id;
+    if (image.length > 200000) { err.textContent = "Image is too large. Choose a smaller image."; return; }
+    const submit = e.currentTarget.querySelector("button[type=submit]"); submit.disabled = true;
+    try {
+      const result = await api(isNew ? "/items" : "/items/" + encodeURIComponent(cur.id), isNew ? "POST" : "PUT", updated);
+      itemCache = itemCache.filter(x => x.id !== result.item.id).concat(result.item);
+      toast(isNew ? "Item added" : "Changes saved"); location.hash = "#/item/" + result.item.id;
+    } catch (error) { err.textContent = error.message; submit.disabled = false; }
   });
 }
 
-/* ---- Router (hash-based, so S3 needs no redirect rules) ---- */
-function route() {
+/* Reload server data on navigation; errors never fall back to demo data. */
+let navigation = 0;
+async function route() {
+  const current = ++navigation;
   const h = location.hash.replace(/^#\/?/, "");
   const [page, arg] = h.split("/");
   renderHeader(); window.scrollTo(0, 0);
   if (page === "login") return viewLogin();
-  if (page === "item" && arg) return viewItem(arg);
-  if (page === "edit" && arg) return viewEdit(arg);
-  viewHome();
+  if (page === "create-account") return viewCreateAccount();
+  $app.innerHTML = '<p role="status">Loading…</p>';
+  try {
+    const result = await api("/items");
+    if (current !== navigation) return;
+    itemCache = result.items;
+    if (page === "item" && arg) return viewItem(arg);
+    if (page === "edit" && arg) return viewEdit(arg);
+    viewHome();
+  } catch (error) {
+    if (current !== navigation) return;
+    $app.innerHTML = `<div class="empty" role="alert">${esc(error.message)}<p><button class="btn" id="retryLoad">Retry</button></p></div>`;
+    document.getElementById("retryLoad").addEventListener("click",route);
+  }
 }
-window.addEventListener("hashchange", route);
-route();
+async function boot() {
+  try { await finishLogin(); }
+  catch (error) { toast(error.message); }
+  window.addEventListener("hashchange", route);
+  route();
+}
+boot();
 </script>
 </body>
 </html>
